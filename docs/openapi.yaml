@@ -1,0 +1,894 @@
+openapi: 3.0.3
+info:
+  title: AgentHub API
+  version: 1.0.0
+  description: |
+    AgentHub 平台服务 REST API 规范（契约以 `internal/server/dto.go` 为准，本文件与其同步维护）。
+
+    - 统一前缀 `/api/v1`，统一响应包络 `{code, message, data}`；`code=0` 表示成功。
+    - 认证：`Authorization: Bearer <token>`，登录返回不透明 token（默认 24h TTL）。
+    - 设备令牌与登录密码分离：设备令牌**仅**用于 WebSocket `/api/v1/ws/adapter` 握手，不能用于本文件的任何 REST 端点。
+    - 实时通道（消息收发、流式增量、状态推送）走两条独立 WebSocket：`/api/v1/ws/client`（浏览器，登录态）与 `/api/v1/ws/adapter`（设备，设备令牌），帧信封 `{type, seq, payload}`；本文件只描述 REST。
+    - 所有时间字段为 RFC3339 / ISO 8601 UTC（例：`2026-01-15T08:30:12Z`）。
+    - 面向后期 app / PC 客户端复用，字段风格统一 `snake_case`。
+  contact:
+    name: AgentHub
+  license:
+    name: Private
+
+servers:
+  - url: https://agent-hub.xxxx.com/api/v1
+    description: 公网（nginx 终止 HTTPS/WSS 后反代到 Go 服务）
+  - url: http://127.0.0.1:8080/api/v1
+    description: 本机 / 开发直连（Vite dev server 亦 proxy 到此）
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Auth
+    description: 登录鉴权
+  - name: Meta
+    description: 平台信息与健康检查
+  - name: Devices
+    description: 设备清单与备注
+  - name: Agents
+    description: Agent 发现 / 注册 / 备注
+  - name: Messages
+    description: 历史消息与会话
+
+# ============================================================
+# Paths
+# ============================================================
+paths:
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: 登录（E01）
+      description: 用配置文件中的单一登录密码换取 Bearer token。免鉴权。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            examples:
+              default:
+                value: { password: "your-login-password" }
+      responses:
+        '200':
+          description: 登录成功（或密码错误，用包络 code 区分）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/LoginData'
+              examples:
+                success:
+                  value:
+                    code: 0
+                    message: ok
+                    data:
+                      token: "Zm9vYmFyLWJhc2U2NHVybC10b2tlbg"
+                      token_type: Bearer
+                      expires_in: 86400
+                wrong_password:
+                  summary: 密码错误（HTTP 401）
+                  value:
+                    code: 1002
+                    message: 密码错误
+                    data: null
+        '401':
+          $ref: '#/components/responses/InvalidPassword'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: 登出（E02）
+      description: 删除服务端 token 哈希，token 即时失效。
+      responses:
+        '200':
+          description: 已登出
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope'
+              example: { code: 0, message: ok, data: null }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: 校验当前登录态（E03）
+      responses:
+        '200':
+          description: 当前会话信息
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/MeData'
+              example:
+                code: 0
+                message: ok
+                data: { authenticated: true, expires_at: "2026-01-16T08:30:12Z" }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /meta:
+    get:
+      tags: [Meta]
+      summary: 平台信息（E04）
+      description: |
+        免鉴权。登录页用于展示平台名称与绑定域名。
+        **绝不返回** 登录密码、设备令牌、监听地址等敏感配置。
+      security: []
+      responses:
+        '200':
+          description: 平台信息
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/MetaData'
+              example:
+                code: 0
+                message: ok
+                data:
+                  name: AgentHub
+                  version: 0.1.0
+                  domain: agent-hub.xxxx.com
+                  protocol_version: 1
+                  agent_types:
+                    - { type: claude, display_name: Claude Code, family: stream }
+                    - { type: hermes, display_name: Hermes, family: acp }
+                    - { type: codex, display_name: Codex, family: app-server }
+                    - { type: openclaw, display_name: OpenClaw, family: json }
+
+  /health:
+    get:
+      tags: [Meta]
+      summary: 健康检查（E05）
+      security: []
+      responses:
+        '200':
+          description: 服务正常
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/HealthData'
+              example:
+                code: 0
+                message: ok
+                data: { status: ok, uptime_s: 12345, db: ok }
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /devices:
+    get:
+      tags: [Devices]
+      summary: 设备列表（E06）
+      description: 返回全部已连接过的设备，`agents` 内嵌该设备上的 agent 摘要（含只读 version / exec_path）。
+      parameters:
+        - $ref: '#/components/parameters/QueryQ'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: 设备清单
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/DeviceListData'
+              example:
+                code: 0
+                message: ok
+                data:
+                  total: 1
+                  items:
+                    - id: "dev_9f2a1c"
+                      name: 我的 Win 工作站
+                      os: windows
+                      arch: amd64
+                      adapter_version: 0.1.0
+                      protocol_version: 1
+                      online: true
+                      last_seen_at: "2026-01-15T08:30:12Z"
+                      remark: 主力开发机
+                      created_at: "2026-01-14T02:00:00Z"
+                      agents:
+                        - id: "dev_9f2a1c:claude"
+                          type: claude
+                          display_name: Claude Code
+                          version: 1.0.3
+                          exec_path: "C:\\Users\\u\\AppData\\Roaming\\npm\\claude.cmd"
+                          registered: true
+                          online: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /devices/{deviceId}/remark:
+    patch:
+      tags: [Devices]
+      summary: 编辑设备备注（E07）
+      parameters:
+        - $ref: '#/components/parameters/DeviceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RemarkRequest'
+            example: { remark: 主力开发机 }
+      responses:
+        '200':
+          description: 更新后的设备
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Device'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/DeviceNotFound'
+
+  /agents/discovered:
+    get:
+      tags: [Agents]
+      summary: 全部已发现 Agent（E08）
+      description: 含**未注册** agent，用于 P-3 发现与管理页。支持按名称/备注搜索与多维筛选。
+      parameters:
+        - $ref: '#/components/parameters/QueryQ'
+        - $ref: '#/components/parameters/TypeFilter'
+        - $ref: '#/components/parameters/OnlineFilter'
+        - $ref: '#/components/parameters/DeviceIdFilter'
+        - $ref: '#/components/parameters/RegisteredFilter'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: 已发现 agent 清单
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/AgentListData'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /agents:
+    get:
+      tags: [Agents]
+      summary: 已注册 Agent 列表（E09）
+      description: 仅返回 registered=true 的 agent，用于 P-4 列表页（默认首页）。每行含名称 / 类型 / 在线状态 / 所属设备四要素。
+      parameters:
+        - $ref: '#/components/parameters/QueryQ'
+        - $ref: '#/components/parameters/TypeFilter'
+        - $ref: '#/components/parameters/OnlineFilter'
+        - $ref: '#/components/parameters/DeviceIdFilter'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: 已注册 agent 清单
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/AgentListData'
+              example:
+                code: 0
+                message: ok
+                data:
+                  total: 1
+                  items:
+                    - id: "dev_9f2a1c:claude"
+                      device_id: "dev_9f2a1c"
+                      device_name: 我的 Win 工作站
+                      type: claude
+                      display_name: Claude Code
+                      name: claude
+                      version: 1.0.3
+                      exec_path: "C:\\Users\\u\\AppData\\Roaming\\npm\\claude.cmd"
+                      remark: 主力
+                      registered: true
+                      online: true
+                      last_seen_at: "2026-01-15T08:30:12Z"
+                      created_at: "2026-01-14T02:00:00Z"
+                      session_id: "ses_7b31"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /agents/batch-register:
+    post:
+      tags: [Agents]
+      summary: 批量注册 Agent（E12）
+      description: 幂等；为成功注册的 agent 自动创建单会话（`sessions`）。不存在的 id 进入 `skipped`。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchRegisterRequest'
+            example:
+              agent_ids: ["dev_9f2a1c:claude", "dev_aa11bb:kimi"]
+      responses:
+        '200':
+          description: 注册结果
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BatchRegisterData'
+              example:
+                code: 0
+                message: ok
+                data:
+                  registered: ["dev_9f2a1c:claude", "dev_aa11bb:kimi"]
+                  skipped: []
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/AgentNotFound'
+
+  /agents/{agentId}/register:
+    parameters:
+      - $ref: '#/components/parameters/AgentId'
+    post:
+      tags: [Agents]
+      summary: 注册单个 Agent（E10）
+      description: 幂等。置 `registered=1` 并 `EnsureSession`；返回含 `session_id` 的 Agent。
+      responses:
+        '200':
+          description: 注册后的 Agent
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Agent'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/AgentNotFound'
+    delete:
+      tags: [Agents]
+      summary: 取消注册并清空会话（E11）★
+      description: |
+        **D-6 铁律**：单事务内只做三件事——
+        ① `UPDATE agents SET registered=0`（不删行、不动备注）；
+        ② `DELETE FROM sessions WHERE agent_id=?`（外键 `ON DELETE CASCADE` 清空该 agent 全部 `messages`）；
+        ③ 向设备推 `agent.unregistered` 并广播 `agent.status`。
+        **不删设备、不断 WebSocket、不影响其它 agent**，之后可重新注册。
+        前端必须先弹二次确认，明写「清空会话数据、不可恢复」。
+      responses:
+        '200':
+          description: 取消注册结果
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/UnregisterData'
+              example:
+                code: 0
+                message: ok
+                data:
+                  agent_id: "dev_9f2a1c:claude"
+                  registered: false
+                  messages_cleared: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/AgentNotFound'
+
+  /agents/{agentId}/remark:
+    parameters:
+      - $ref: '#/components/parameters/AgentId'
+    patch:
+      tags: [Agents]
+      summary: 编辑 Agent 备注（E13）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RemarkRequest'
+            example: { remark: 主力 }
+      responses:
+        '200':
+          description: 更新后的 Agent
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Agent'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/AgentNotFound'
+
+  /agents/{agentId}/messages:
+    parameters:
+      - $ref: '#/components/parameters/AgentId'
+    get:
+      tags: [Messages]
+      summary: 历史消息（E14）
+      description: |
+        按会话内单调 `seq` 返回消息，用于进入对话页加载历史与**断线重连按 `since_seq` 补齐**（R-16，不重复不丢序）。
+        已注册但从未发过消息时返回 `200 + items: []`（不报错）。
+      parameters:
+        - name: since_seq
+          in: query
+          description: 只返回 `seq > since_seq` 的消息；0 表示全部
+          required: false
+          schema: { type: integer, format: int64, minimum: 0, default: 0 }
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 历史消息
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/MessageListData'
+              example:
+                code: 0
+                message: ok
+                data:
+                  latest_seq: 42
+                  has_more: false
+                  items:
+                    - seq: 41
+                      role: user
+                      content: 帮我看下构建报错
+                      status: complete
+                      created_at: "2026-01-15T08:31:00Z"
+                    - seq: 42
+                      role: assistant
+                      content: 我先检查一下……
+                      status: complete
+                      created_at: "2026-01-15T08:31:05Z"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/AgentNotFound'
+        '409':
+          $ref: '#/components/responses/AgentNotRegistered'
+
+  /agents/{agentId}/session:
+    parameters:
+      - $ref: '#/components/parameters/AgentId'
+    get:
+      tags: [Messages]
+      summary: 当前会话信息（E15）
+      description: 一个 agent 一条会话（Q4 单会话）。`resume_id` 为平台侧持久化的会话恢复标识。
+      responses:
+        '200':
+          description: 会话信息
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/SessionData'
+              examples:
+                exists:
+                  value:
+                    code: 0
+                    message: ok
+                    data:
+                      session_id: "ses_7b31"
+                      resume_id: "c3f1-...-session-uuid"
+                      message_count: 42
+                none:
+                  value:
+                    code: 0
+                    message: ok
+                    data: { session_id: null, resume_id: "", message_count: 0 }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/AgentNotFound'
+        '409':
+          $ref: '#/components/responses/AgentNotRegistered'
+
+# ============================================================
+# Components
+# ============================================================
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque-token
+      description: |
+        登录后由 `POST /auth/login` 返回的**不透明 token**（base64url，32 字节随机），
+        服务端只存 SHA-256 哈希 + 过期时间。默认 TTL 24h，不滑动续期；`POST /auth/logout` 即时吊销。
+        注意：设备令牌（device_token）是另一套凭据，仅用于 `/api/v1/ws/adapter` 握手，不能用于此处。
+
+  parameters:
+    DeviceId:
+      name: deviceId
+      in: path
+      required: true
+      description: 设备 id（`dev_<uuid>`）
+      schema: { type: string }
+      example: "dev_9f2a1c"
+    AgentId:
+      name: agentId
+      in: path
+      required: true
+      description: |
+        Agent id，格式为 `<device_id>:<type>`（例 `dev_9f2a1c:claude`）。
+        含冒号，URL 中必须 `encodeURIComponent` 编码；Go 侧 `r.PathValue` 自动解码。
+      schema: { type: string }
+      example: "dev_9f2a1c:claude"
+    QueryQ:
+      name: q
+      in: query
+      required: false
+      description: 按名称 / 备注模糊搜索
+      schema: { type: string }
+    TypeFilter:
+      name: type
+      in: query
+      required: false
+      description: 按 agent 类型筛选
+      schema:
+        type: string
+        enum: [claude, codebuddy, qwen, cursor, hermes, kimi, codex, opencode, openclaw]
+    OnlineFilter:
+      name: online
+      in: query
+      required: false
+      description: 按在线状态筛选
+      schema: { type: boolean }
+    DeviceIdFilter:
+      name: device_id
+      in: query
+      required: false
+      description: 按所属设备筛选
+      schema: { type: string }
+    RegisteredFilter:
+      name: registered
+      in: query
+      required: false
+      description: 仅 E08 支持，按注册态筛选
+      schema: { type: boolean }
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+    Offset:
+      name: offset
+      in: query
+      required: false
+      schema: { type: integer, minimum: 0, default: 0 }
+
+  responses:
+    Unauthorized:
+      description: 未登录 / token 无效或过期
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Envelope' }
+          example: { code: 1001, message: 请先登录, data: null }
+    InvalidPassword:
+      description: 密码错误
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Envelope' }
+          example: { code: 1002, message: 密码错误, data: null }
+    BadRequest:
+      description: 请求参数有误
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Envelope' }
+          example: { code: 1004, message: 请求参数有误, data: null }
+    DeviceNotFound:
+      description: 设备不存在
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Envelope' }
+          example: { code: 2001, message: 设备不存在, data: null }
+    AgentNotFound:
+      description: Agent 不存在
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Envelope' }
+          example: { code: 3001, message: Agent 不存在, data: null }
+    AgentNotRegistered:
+      description: 该 Agent 尚未注册
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Envelope' }
+          example: { code: 3002, message: 该 Agent 尚未注册, data: null }
+    AgentOffline:
+      description: Agent 当前离线（WS 侧亦可能以 chat.error 帧返回同一 code）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Envelope' }
+          example: { code: 3003, message: "Agent 当前离线，暂时无法发送消息", data: null }
+    InternalError:
+      description: 服务内部错误
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Envelope' }
+          example: { code: 5000, message: 服务内部错误，请稍后重试, data: null }
+
+  schemas:
+    # ---------- 统一包络 ----------
+    Envelope:
+      type: object
+      required: [code, message, data]
+      properties:
+        code:
+          type: integer
+          description: |
+            业务错误码（与 WebSocket `chat.error.code` 共用同一套常量）：
+            `0`=成功；`1001`=未登录；`1002`=密码错误；`1003`=token 过期；`1004`=参数有误；
+            `1005`=请求的资源不存在（HTTP 404，未知 API 路径）；
+            `2001`=设备不存在；`3001`=Agent 不存在；`3002`=未注册；`3003`=Agent 离线；
+            `4001`=会话不存在；`4002`=消息过长；`4003`=生成中；
+            `5000`=内部错误；`5001`=设备令牌无效；`5002`=协议版本不匹配；
+            `5003`=CLI 启动失败；`5004`=会话恢复失败（已开新会话）；`5005`=生成超时。
+          example: 0
+        message:
+          type: string
+          description: 简体中文提示，可直接展示给用户
+          example: ok
+        data:
+          description: 成功时为业务数据；失败时恒为 null
+          nullable: true
+
+    # ---------- Auth / Meta ----------
+    LoginRequest:
+      type: object
+      required: [password]
+      properties:
+        password: { type: string, format: password, description: 配置文件中的登录密码 }
+    LoginData:
+      type: object
+      required: [token, token_type, expires_in]
+      properties:
+        token: { type: string, description: 不透明 Bearer token }
+        token_type: { type: string, example: Bearer }
+        expires_in: { type: integer, description: 有效期（秒）, example: 86400 }
+    MeData:
+      type: object
+      properties:
+        authenticated: { type: boolean, example: true }
+        expires_at: { type: string, format: date-time }
+    MetaData:
+      type: object
+      required: [name, version, domain, protocol_version, agent_types]
+      properties:
+        name: { type: string, example: AgentHub }
+        version: { type: string, example: 0.1.0 }
+        domain: { type: string, example: agent-hub.xxxx.com }
+        protocol_version: { type: integer, example: 1 }
+        agent_types:
+          type: array
+          items: { $ref: '#/components/schemas/AgentTypeInfo' }
+    AgentTypeInfo:
+      type: object
+      properties:
+        type: { type: string, example: claude }
+        display_name: { type: string, example: Claude Code }
+        family:
+          type: string
+          enum: [stream, acp, app-server, json]
+    HealthData:
+      type: object
+      properties:
+        status: { type: string, example: ok }
+        uptime_s: { type: integer }
+        db: { type: string, example: ok }
+
+    # ---------- Devices / Agents ----------
+    AgentBrief:
+      type: object
+      description: 设备页展开项里的 agent 摘要（含 Q14 只读 version / exec_path）
+      required: [id, type, display_name, registered, online]
+      properties:
+        id: { type: string, example: "dev_9f2a1c:claude" }
+        type: { type: string, example: claude }
+        display_name: { type: string, example: Claude Code }
+        version: { type: string, example: 1.0.3 }
+        exec_path: { type: string, example: "C:\\Users\\u\\AppData\\Roaming\\npm\\claude.cmd" }
+        registered: { type: boolean }
+        online: { type: boolean }
+    Device:
+      type: object
+      required: [id, name, os, arch, online, remark, created_at]
+      properties:
+        id: { type: string, example: "dev_9f2a1c" }
+        name: { type: string, example: 我的 Win 工作站 }
+        os: { type: string, enum: [windows, linux, darwin], example: windows }
+        arch: { type: string, enum: [amd64, arm64], example: amd64 }
+        adapter_version: { type: string, example: 0.1.0 }
+        protocol_version: { type: integer, example: 1 }
+        online: { type: boolean, description: 由 WS 连接 + 心跳推导，与注册态独立 }
+        last_seen_at: { type: string, format: date-time, nullable: true }
+        remark: { type: string, description: 设备备注, example: 主力开发机 }
+        created_at: { type: string, format: date-time }
+        agents:
+          type: array
+          items: { $ref: '#/components/schemas/AgentBrief' }
+    DeviceListData:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Device' }
+        total: { type: integer }
+    Agent:
+      type: object
+      description: |
+        Agent 全量 DTO。三态独立：`registered`（用户勾选，持久化）/ `online`（WS+心跳推导）/ 行存在即 `discovered`。
+      required: [id, device_id, type, display_name, registered, online]
+      properties:
+        id: { type: string, example: "dev_9f2a1c:claude" }
+        device_id: { type: string, example: "dev_9f2a1c" }
+        device_name: { type: string, description: JOIN devices.name，列表四要素之「所属设备」, example: 我的 Win 工作站 }
+        type:
+          type: string
+          enum: [claude, codebuddy, qwen, cursor, hermes, kimi, codex, opencode, openclaw]
+        display_name: { type: string, example: Claude Code }
+        name: { type: string, example: claude }
+        version: { type: string, example: 1.0.3 }
+        exec_path: { type: string }
+        remark: { type: string, example: 主力 }
+        registered: { type: boolean, example: true }
+        online: { type: boolean, example: true }
+        last_seen_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        session_id:
+          type: string
+          nullable: true
+          description: 仅已注册且已建会话时返回（LEFT JOIN sessions.id）
+          example: "ses_7b31"
+    AgentListData:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Agent' }
+        total: { type: integer }
+    RemarkRequest:
+      type: object
+      required: [remark]
+      properties:
+        remark: { type: string, maxLength: 500, description: 纯文本备注，≤500 字 }
+    BatchRegisterRequest:
+      type: object
+      required: [agent_ids]
+      properties:
+        agent_ids:
+          type: array
+          minItems: 1
+          items: { type: string }
+          example: ["dev_9f2a1c:claude", "dev_aa11bb:kimi"]
+    BatchRegisterData:
+      type: object
+      properties:
+        registered:
+          type: array
+          items: { type: string }
+        skipped:
+          type: array
+          items: { type: string }
+    UnregisterData:
+      type: object
+      required: [agent_id, registered, messages_cleared]
+      properties:
+        agent_id: { type: string }
+        registered: { type: boolean, example: false }
+        messages_cleared:
+          type: boolean
+          description: 该 agent 的 sessions/messages 是否已由外键级联清空
+          example: true
+
+    # ---------- Messages / Session ----------
+    Msg:
+      type: object
+      required: [seq, role, content, status, created_at]
+      properties:
+        seq:
+          type: integer
+          format: int64
+          description: 会话内单调递增，由平台唯一分配；用于 `since_seq` 补齐，与 WS 连接级 seq 是不同概念
+        role: { type: string, enum: [user, assistant, system] }
+        content: { type: string }
+        status:
+          type: string
+          enum: [streaming, complete, error, stopped, interrupted]
+          description: 流式占位为 streaming，chat.done 后落为 complete/stopped/interrupted，出错为 error
+        created_at: { type: string, format: date-time }
+    MessageListData:
+      type: object
+      required: [items, has_more, latest_seq]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Msg' }
+        has_more: { type: boolean }
+        latest_seq: { type: integer, format: int64, description: 当前会话最大 seq，前端据此更新游标 }
+    SessionData:
+      type: object
+      properties:
+        session_id: { type: string, nullable: true, example: "ses_7b31" }
+        resume_id:
+          type: string
+          description: 平台侧持久化的会话恢复标识（适配器不持久化，仅透传）
+          example: "c3f1-...-session-uuid"
+        message_count: { type: integer, example: 42 }

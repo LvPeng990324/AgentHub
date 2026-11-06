@@ -1,0 +1,25 @@
+{
+  "server": {
+    "password": "请改成你的登录密码",
+    "domain": "agent-hub.xxxx.com",
+    "listen_addr": "127.0.0.1:8080",
+    "device_token": "请用 openssl rand -hex 32 生成后填入",
+    "db_path": "./agenthub.db",
+    "token_ttl_seconds": 86400,
+    "heartbeat_timeout_cycles": 3,
+    "log_level": "info",
+    "protocol_version": 1
+  },
+  "adapter": {
+    "platform_ws_url": "wss://agent-hub.xxxx.com/api/v1/ws/adapter",
+    "device_token": "与 server.device_token 完全一致",
+    "device_name": "",
+    "discover_period_seconds": 120,
+    "heartbeat_interval_seconds": 15,
+    "device_id_path": "~/.agenthub/device_id",
+    "agent_paths": {},
+    "working_dir": "",
+    "turn_timeout_s": 1800,
+    "log_level": "info"
+  }
+}

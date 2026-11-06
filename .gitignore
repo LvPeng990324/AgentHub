@@ -1,0 +1,25 @@
+# ---------- 构建产物 ----------
+/bin/
+/web/dist/*
+!/web/dist/index.html
+
+# ---------- 前端依赖 ----------
+/web/node_modules/
+# npm 独立缓存（make web 用 --cache 规避全局缓存损坏）
+/web/.npm-cache/
+
+# ---------- 本地配置（含登录密码 / 设备令牌，禁止入库） ----------
+/config.json
+/adapter.json
+
+# ---------- SQLite 单文件及 WAL 附属文件 ----------
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+
+# ---------- 编辑器 / 操作系统 ----------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
